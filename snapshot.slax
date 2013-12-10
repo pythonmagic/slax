@@ -1,0 +1,38 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns date = "http://exslt.org/dates-and-times";
+
+import "../import/junos.xsl";
+
+
+match / {
+    <op-script-output> {
+	
+	var $get-vpls = <get-configuration database="committed" inherit="inherit"> {
+		<configuration> {
+			<routing-instances>;
+		}
+	}
+	var $config = jcs:invoke($get-vpls);
+	
+	for-each( $config/routing-instances/instance ) {
+		if (instance-type == "vpls") {
+			expr jcs:output(name);
+		    expr jcs:output (instance-type);
+             var $rpc = <get-vpls-mac-table> {
+                <instance> name;
+                 <extensive>;
+              }
+			 var $out = jcs:invoke($rpc);
+			 
+			var $filename = "/var/tmp/mac/" _ name _ ".xml";
+             < xsl:document href=$filename indent="yes"> {
+                copy-of $out;
+             }
+        }
+		}
+	}
+}
