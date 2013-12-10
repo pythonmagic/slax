@@ -1,0 +1,100 @@
+version 1.0;
+ 
+/*
+- show vpls statistics / clear vpls statistics
+- Current Junos Release does have support for "clear vpls statistics"
+- This is work around script that take two snapshot of statistics
+- and display the diffrene between the first and second reading.
+
+- Author        : Neeraj Shetty
+- E-mail        : nshetty@juniper.net
+- Version       : 2.0
+- Last Modified :  
+
+- Copyright (c) 2005, Juniper Networks, Inc.
+- All rights reserved.
+-
+ */
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns date = "http://exslt.org/dates-and-times";
+ 
+import "../import/junos.xsl";
+ 
+var $arguments = {
+    <argument> {
+    <name> "instance-name";
+    <description> "Instance Name";
+    }
+    <argument> {
+    <name> "seconds";
+    <description> "Duration between two snapshot (in Sec) ";
+    }
+}
+ 
+param $instance-name;
+param $seconds;
+ 
+match / {
+    <op-script-output> {
+ 
+/* Check cli argument Instance Name */
+if( not( $instance-name) ) {
+    <xsl:message terminate="yes"> "You must specify instance name.";
+}
+ 
+             var $rpc = <get-vpls-statistics-information> {
+                <instance> $instance-name;
+                }
+                var $out = jcs:invoke($rpc);
+                var $filename = "/var/tmp/vstat" _ date:seconds( ) _ ".xml";
+                <xsl:document href= $filename method="xml" indent="yes"> {
+                        copy-of $out;
+                }
+                /* Use defualt value of 5 if no cli argument seconds */
+                if( not( $seconds) ) {
+                    expr jcs:sleep(5);
+                } else {
+                    expr jcs:sleep($seconds);
+                }                       
+ 
+                var $out1 = jcs:invoke($rpc);
+                <output> jcs:printf ("%-15s%-15s%-15s%-15s%-15s%-15s%-15s%-15s%-15s","Interface","Bcast Pkt","Bcast Byte","Mcast Pkt","Mcast Byte","Ucast Pkt","Ucast Byte","Flood Pkt","Flood Byte");
+                <vpls-statistics-information> {
+                for-each ($out1/interface-statistics) {
+                                var $file = document($filename);
+                                var $iname = interface/interface-name;
+                                var $ibp = broadcast-packets;
+                                var $ibb = broadcast-bytes;
+                                var $imp = multicast-packets;
+                                var $imb = multicast-bytes;
+                                var $iup = unicast-packets;
+                                var $iub = unicast-bytes;
+                                var $ifp = flooded-packets;
+                                var $ifb = flooded-bytes;
+ 
+                        for-each ($file//*[local-name() == "interface-statistics"]){
+                                var $ifd_name = ./*[local-name() == "interface"];
+                                var $name = $ifd_name/*[local-name() == "interface-name"];
+                                if ($name == $iname) {
+                                        var $bp = ./*[local-name() == "broadcast-packets"];
+                                        var $bb = ./*[local-name() == "broadcast-bytes"];
+                                        var $mp = ./*[local-name() == "multicast-packets"];
+                                        var $mb = ./*[local-name() == "multicast-bytes"];
+                                        var $fp = ./*[local-name() == "flooded-packets"];
+                                        var $fb = ./*[local-name() == "flooded-bytes"];
+                                        var $up = ./*[local-name() == "unicast-packets"];
+                                        var $ub = ./*[local-name() == "unicast-bytes"];
+                                        <output> jcs:printf ("%-20s%-15s%-15s%-15s%-15s%-15s%-15s%-15s%-15s",$name,$ibp - $bp,$ibb - $bp,$imp - $mp,$imb - $mb,$iup -$up,$iub - $ub,$ifp - $fp,$ifb - $fb);
+                                }
+                        }
+                    }
+                }
+    }
+ 
+/* Delet Vstat XML in /var/tmp */
+var $process-rpc = <command> "file delete /var/tmp/vstat*.xml";
+var $processes = jcs:invoke( $process-rpc );
+ 
+}
