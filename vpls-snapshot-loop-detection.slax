@@ -1,0 +1,377 @@
+/* TO DO 
+* 
+*  4. Add logic to use statistical approach when no data is available
+*  5. Add comments
+*/
+
+/*
+* Author           : Todd Walker (twalker@juniper.net)
+                   : Kumar Muthuswamy (kmuthuswamy@juniper.net) 
+* Based on work by : Neeraj Shetty (nshetty@juniper.net)
+                   : Andy Leung (aleung@juniper.net)
+* Program          : vpls-snapshot-loop-detection.slax
+* Modification     : 2013-07-20
+* Platform         : MX
+* Description      : Disables interfaces if a loop is detected on VPLS 
+*                    instances.  This requires a MAC snapshot to be taken by 
+*                    the vpls-mac-snapshot script.
+*            
+*                    The script builds a list of MACs that have moved from 
+*                    network side to physical ports for each VPLS instance.
+*                    It then checks against the MAC snapshot to see if that 
+*                    MAC was previously on the network side.  If so, it 
+*                    disables the port.
+*
+* Copyright (c) 2013  Juniper Networks. All Rights Reserved.
+*
+* YOU MUST ACCEPT THE TERMS OF THIS DISCLAIMER TO USE THIS SOFTWARE,
+* IN ADDITION TO ANY OTHER LICENSES AND TERMS REQUIRED BY JUNIPER NETWORKS.
+*
+* JUNIPER IS WILLING TO MAKE THE INCLUDED SCRIPTING SOFTWARE AVAILABLE TO YOU
+* ONLY UPON THE CONDITION THAT YOU ACCEPT ALL OF THE TERMS CONTAINED IN THIS
+* DISCLAIMER. PLEASE READ THE TERMS AND CONDITIONS OF THIS DISCLAIMER
+* CAREFULLY.
+*
+* THE SOFTWARE CONTAINED IN THIS FILE IS PROVIDED "AS IS." JUNIPER MAKES NO
+* WARRANTIES OF ANY KIND WHATSOEVER WITH RESPECT TO SOFTWARE. ALL EXPRESS OR
+* IMPLIED CONDITIONS, REPRESENTATIONS AND WARRANTIES, INCLUDING ANY WARRANTY
+* OF NON-INFRINGEMENT OR WARRANTY OF MERCHANTABILITY OR FITNESS FOR A
+* PARTICULAR PURPOSE, ARE HEREBY DISCLAIMED AND EXCLUDED TO THE EXTENT
+* ALLOWED BY APPLICABLE LAW.
+*
+* IN NO EVENT WILL JUNIPER BE LIABLE FOR ANY DIRECT OR INDIRECT DAMAGES,
+* INCLUDING BUT NOT LIMITED TO LOST REVENUE, PROFIT OR DATA, OR
+* FOR DIRECT, SPECIAL, INDIRECT, CONSEQUENTIAL, INCIDENTAL OR PUNITIVE DAMAGES
+* HOWEVER CAUSED AND REGARDLESS OF THE THEORY OF LIABILITY ARISING OUT OF THE
+* USE OF OR INABILITY TO USE THE SOFTWARE, EVEN IF JUNIPER HAS BEEN ADVISED OF
+* THE POSSIBILITY OF SUCH DAMAGES.
+*/
+
+version 1.0;
+
+/* Standard Junos namespaces */
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+/* EXSLT namespaces */
+ns date extension = "http://exslt.org/dates-and-times";
+ns ext = "http://xmlsoft.org/XSLT/namespace";
+
+import "../import/junos.xsl";
+
+
+/******************************************************************************/
+/* oldest-mac-move = time in seconds for the oldest mac move the script should*/
+/*                   process for interface deactivation.                      */
+/*                                                                            */
+/* mac-move-entries = number of mac-move entries to process                   */
+/******************************************************************************/
+var $arguments = {
+	<argument> {
+		<name> "oldest-mac-move";
+		<description> "oldest age of mac-move processed (seconds)";
+	}
+	<argument> {
+		<name> "mac-move-entries";
+		<description> "number of mac-move entries to process";
+	}
+	<argument> {
+		<name> "dampen";
+		<description> "when equal to true the script will only run once a minute";
+	}
+}
+param $oldest-mac-move = 60;
+param $mac-move-entries = 100;
+param $dampen = "true";
+
+match / {
+  /* Make sure the script will only run once a minute */
+
+  if ($dampen == 'true') {
+    if(not( jcs:dampen( "vpls-snapshot-loop-detection", 1, 1 ))) {
+      expr jcs:output("Dampening in effect, exiting");
+      <xsl:message terminate="yes">;
+    }
+  }
+  
+  var $jnx = jcs:open();
+
+  /* Get a copy of the mac-move-buffer */
+  var $rpc-mac-move = <command> "show l2-learning mac-move-buffer extensive";
+  var $r-mac-move   = jcs:execute($jnx, $rpc-mac-move);
+  
+  var $init := <items>;
+
+  /* This builds a list of all bridge domains listed in mac-move entries */
+  var $bds := { 
+    call list-bridge-domains($mm = $r-mac-move, $bds = $init, $i = 0); }
+
+  /* process each bridge domain that we found */  
+  for-each ($bds/domains/domain) {
+  
+    var $name = name;
+    expr jcs:output("Processing Bridge Domain: ", $name);
+
+    var $stats-per := { call stats-percentage($bd=$name, $mm=$r-mac-move); };
+    var $per = number($stats-per);
+    
+    var $imacs := { call get-interesting-mac($mm = $r-mac-move, $macs = $init, 
+      $domain = $name, $i = 0); }
+
+    /* get bridge domain to instance mappings */
+    var $rpc-l2-bd = <command> "show l2-learning instance bridge-domain " _ $name;
+    var $r-l2-bd   = jcs:execute($jnx, $rpc-l2-bd);
+    
+    var $ri = $r-l2-bd//l2rtb-name;
+
+    var $filename = "/var/tmp/" _ $ri _ ".xml";
+    var $file = document ($filename);
+    
+    var $iifls := {call build-interfaces($macs = $imacs, $ifls = $init, 
+      $file = $file, $i = 1, $per);}
+
+    var $cfg-change := { call build-configuration($ifls=$iifls, $comment='no'); };
+    call commit-changes ($jnx, $cfg-change);
+    
+    var $cmt-change := { call build-configuration($ifls=$iifls, $comment='yes'); };
+    call commit-changes ($jnx, $cfg-change = $cmt-change);
+  }
+  expr jcs:close( $jnx );
+}
+
+template list-bridge-domains ($mm, $bds, $i) {
+
+  var $bd = $mm/l2ald-mac-move-entry[last()-$i]/l2ald-mac-move-bridge-domain;
+  
+  if (not(jcs:empty($bd)) && ($i < $mac-move-entries)) {
+    var $sub = "bridge-domain";
+    var $tmp := { call add-item($items=$bds, $item=$bd, $subitem = $sub); };
+    call list-bridge-domains($mm = $mm, $bds = $tmp, $i = $i + 1);
+  }
+  else {
+    <domains> {
+      for-each ($bds/items/item) { 
+        var $name = name; 
+        <domain> { <name> $name; } 
+      }
+    }
+  }
+}
+
+template add-item ($items, $item, $subitem) {
+  <items> {
+    for-each ($items/items/item) { 
+      var $name = name;
+      var $si = subitem;
+      <item> {
+        <name> $name;
+        <subitem> $si;
+      }
+    }  
+    if ( not($items/items/item[name=$item])) {
+      <item> { 
+        <name> $item;
+        <subitem> $subitem;
+      }
+    }
+  } 
+}
+
+
+template get-interesting-mac ($mm, $macs, $domain, $i) {
+
+  var $bd     = $mm/l2ald-mac-move-entry[last()-$i]/l2ald-mac-move-bridge-domain;
+  var $addr   = $mm/l2ald-mac-move-entry[last()-$i]/l2ald-mac-address;
+  var $to     = $mm/l2ald-mac-move-entry[last()-$i]/l2ald-mac-move-to-ifl;
+  var $from   = $mm/l2ald-mac-move-entry[last()-$i]/l2ald-mac-move-from-ifl;
+  var $time   = $mm/l2ald-mac-move-entry[last()-$i]/l2ald-mac-move-time-rec;
+  var $curr-time    = date:date-time(); 
+  var $dt = date:date()_ "T" _ $time _ "Z";
+  var $ddiff  = date:difference($dt, $curr-time); 
+  var $sec    = date:seconds($ddiff); 
+  
+  if (not(jcs:empty($bd))&& ($i < $mac-move-entries)) {
+
+    /* For us to process the entries, the entry must                         */
+    /*  1) be in the domain we are currently processing                      */
+    /*  2) must be a move from lsi to physical                               */
+    /*  3) must be in the time interval we are intrestested in (last 60 sec) */
+    /*  4) must not be a virtual mac                                         */
+
+    if ((($domain == $bd ) &&
+       ((starts-with($from, "lsi")) && 
+       (not(starts-with($to, "lsi")))) &&
+       (($sec > 0 ) && ($sec < $oldest-mac-move))) && 
+       (not(jcs:regex( "00:00:5e:00:01:..", $addr) || 
+            jcs:regex( "00:00:0c:07:ac:..", $addr) || 
+            jcs:regex( "00:07:b4:00:01:..", $addr) || 
+            jcs:regex( "02:bf:..:..:..:..", $addr))))   {
+  
+      var $tmp := { call add-item($items=$macs, $item=$addr, $subitem = $to); };
+      call get-interesting-mac($mm = $mm, $macs = $tmp, $domain = $domain, 
+        $i = $i + 1); 
+    }
+    else {
+      call get-interesting-mac($mm = $mm, $macs = $macs, $domain = $domain, 
+        $i = $i + 1);
+    }
+  }
+  else {
+    <macs> {
+      for-each ($macs/items/item) { 
+        var $name = name;
+        var $si = subitem;
+        <mac> { 
+          <name> $name; 
+          <interface> $si;
+        } 
+      }
+    }
+  }
+}
+
+template build-interfaces ($macs, $ifls, $file, $i, $per) {
+  var $addr = $macs/macs/mac[$i]/name;
+  
+  if (not(jcs:empty($addr))) {
+    var $interface = $macs/macs/mac[$i]/interface;
+    expr jcs:output("  Checking MAC Address: ", $addr, " on ", $interface);
+
+    var $iint := { call get-interesting-interfaces($file, $addr, $interface, 
+        $ifls, $per); };
+    
+    if (not(jcs:empty($iint))) {
+      var $tmp := { call add-item($items=$ifls, $item=$interface, 
+          $subitem = "ifl"); };
+      call build-interfaces($macs = $macs, $ifls = $tmp, $file = $file, 
+          $i = $i + 1, $per);
+    }
+  }
+  else {
+    if ($ifls/items/item) {
+      <interfaces> {
+        for-each ($ifls/items/item) { 
+          var $name = name;
+          <interface> { 
+            <name> $name; 
+          } 
+        }
+      }
+    }
+  }
+}
+
+template get-interesting-interfaces ($file, $addr, $interface, $ifls, $per) {
+
+  if ($file/l2ald-rtb-macdb/l2ald-mac-entry[l2-mac-address == string($addr)]) {
+    var $fileint = $file/l2ald-rtb-macdb/l2ald-mac-entry[l2-mac-address == string($addr)]/l2-mac-logical-interface;
+    if (not($interface = $fileint)) {
+      expr $interface;
+    }
+  }
+  else {
+    expr jcs:output("  MAC ", $addr, " not found in cache, trying statistical approach");
+    if ($per > 90) {
+      expr $interface;
+    }
+  }
+}
+
+template build-configuration ($ifls, $comment) {
+
+  if ($ifls/interfaces/interface) {
+    var $first-ifl = $ifls/interfaces/interface/name;
+    var $pattern = "[.]";
+    var $substrings = jcs:split($pattern, $first-ifl);
+    var $physical = $substrings[1];
+    var $unit = $substrings[2];
+
+    <configuration> {
+      <interfaces>  {
+        <interface>  {
+          <name> $physical;
+          <unit> {
+            <name> $unit;
+            if ($comment = "yes") {
+              <comment> "Interface disabled by loop detection script (" _ 
+                  $localtime-iso _ ")";
+            }
+            else {
+              expr jcs:syslog("user.error","VPLS-LOOP-DETECTION: Disabling ",
+                  $first-ifl, " as loop appears to be present");
+            }
+            <disable>;
+          }  
+        }
+      }
+    }
+  }  
+}
+
+template commit-changes ($jnx, $cfg-change) {
+    /* if we have an interface to change then proceed */
+    if ($cfg-change/configuration/interfaces/interface) {  
+      var $config-private =   <open-configuration> { <private>; }
+      var $private-results = jcs:execute( $jnx, $config-private );
+      var $load-configuration =  <load-configuration> { copy-of $cfg-change; }
+          
+      var $load-results = jcs:execute( $jnx, $load-configuration );
+      if( $load-results//self::xnm:error ) {
+        expr jcs:output( "configuration error during load: ", 
+          $load-results//self::xnm:error/message );
+      }
+    
+      var $commit-configuration = <commit-configuration>;
+      var $commit-results = jcs:execute( $jnx, $commit-configuration );
+      if( $commit-results//self::xnm:error ) {
+        expr jcs:output( "ERROR DURING COMMIT: ", 
+          $commit-results//self::xnm:error/message );
+        expr jcs:syslog("user.error",
+          "VPLS-LOOP-DETECTION: Error during commit, ",
+          "changes may not have completed: ",
+          $commit-results//self::xnm:error/message);
+      }
+      else {
+        expr jcs:output ("Commit Completed Successfully");
+        expr jcs:syslog("user.error",
+          "VPLS-LOOP-DETECTION: Changes commited successfully");
+      }
+      var $close-private = <close-configuration>;
+      var $close-configuration-results = jcs:execute( $jnx, $close-private );
+    }
+    else {
+      expr jcs:output("  No configuration changes needed");
+    }
+}
+
+template stats-percentage ($mm, $bd) {
+  var $bd-count = count($mm/l2ald-mac-move-entry[
+      contains(l2ald-mac-move-bridge-domain,$bd)]);
+  
+  /* Count total number of move from LSI <-> PHY &  PHY <-> PHY */
+
+  var $lsi-to-phy-count = 
+    count($mm/l2ald-mac-move-entry[starts-with(l2ald-mac-move-from-ifl,"lsi") && 
+    not(starts-with(l2ald-mac-move-to-ifl,"lsi")) &&
+    (l2ald-mac-move-bridge-domain == $bd)]);
+            
+  var $phy-to-lsi-count = 
+    count($mm/l2ald-mac-move-entry[starts-with(l2ald-mac-move-to-ifl,
+      "lsi") && not(starts-with(l2ald-mac-move-from-ifl,"lsi")) && 
+      (l2ald-mac-move-bridge-domain == $bd)]);
+            
+  var $phy-to-phy-count = 
+    count($mm/l2ald-mac-move-entry[not(starts-with(l2ald-mac-move-to-ifl,
+      "lsi")) && not(starts-with(l2ald-mac-move-from-ifl,"lsi")) && 
+      (l2ald-mac-move-bridge-domain == $bd)]);
+            
+  var $total = $lsi-to-phy-count + $phy-to-lsi-count + $phy-to-phy-count;
+  var $count = count($mm/l2ald-mac-move-entry[l2ald-mac-move-bridge-domain ==
+      $bd]);
+      
+  var $per = ($total div $bd-count) * 100;
+  
+  <percentage> $per;
+}
+
