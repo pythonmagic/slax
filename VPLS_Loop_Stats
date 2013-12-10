@@ -1,0 +1,229 @@
+/* NAME: loop.slax /*
+
+/* FUNCTION: 	
+*		To shutdown a customer facing interface unit that is looping 
+*		traffic back into a VPLS instance.
+
+/* METHOD:
+*		The script is triggered by event "l2ald_mac_move_notification"
+*		It firstly creates the event-policy to call itself in config.
+*		It checks the contents of the command 
+*				"show l2-learning mac-move-buffer extensive".
+*		ALL THE BELOW CALCULATION ARE MADE PER BRIDGE DOMAIN
+*		And then the script would count total number of moves 
+*		LSI -> PHY ,PHY -> LSI,PHY -> Phy
+*		Action is take if above count is more than 90% of the total move
+*		On the Node which has loop condition most of move would be between
+* 		LSI -> & PHY -> LSI (Total greateer then 90%)
+*		On the far end node the move would be between
+*		LSI -> PHY , PHY -> LSI and LSI -> LSI (Total Much less then 90%)
+*		If the interface is not "lsi" the interface-unit is disabled.
+*		and a message is sent to syslog...
+*
+*		For more detail about the detection logic and Flow diagram 
+*		Please Refere to VPLS Loop prevention script.pptx (matrix.juniper.net)
+*
+*    CREATED: 04/1/2013
+*    BY: Neeraj Shetty (Juniper Networks) 
+*	 Loop Detection Logic By: 
+*		Andy Leung (Juniper Networks)
+*    LAST MOD:05/13/2013
+*    BY: Neeraj Shetty
+*    SCRIPT VERSION: 10.0
+*
+*
+*
+*/
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns date = "http://exslt.org/dates-and-times";
+
+import "../import/junos.xsl";
+
+var $arguments = {
+<argument> {
+	<name> "inst1";
+	<description> "Instance Name";
+}
+<argument> {
+	<name> "inst2";
+	<description> "Instance Name";
+}
+<argument> {
+	<name> "inst3";
+	<description> "Instance Name";
+}
+<argument> {
+	<name> "inst4";
+	<description> "Instance Name";
+}
+}
+param $inst1;
+param $inst2;
+param $inst3;
+param $inst4;
+
+match / {
+    <op-script-output> {	
+	expr jcs:syslog("user.notice","VPLS_LOOP_SCRIPT * * *  STARTED * * *.");
+	
+	/* Dampen the script to Run ONLY Once every Minute */
+    if (jcs:dampen('mytag1', 1, 1)) {
+	    var $mac-move-rpc = {
+			<get-l2-learning-mac-move-buffer-information> {
+				<extensive>;
+			}
+		}
+		
+    var $res = jcs:invoke($mac-move-rpc);
+	var $db = $res/l2ald-mac-move-entry/l2ald-mac-move-bridge-domain;
+	expr jcs:output("DB: ",$db);
+
+/* Exclude VPLS & NTE In-band NM VPLS INSTANCE */
+
+if (not (contains($db,"INFRA1234"))) {
+        var $db-count= count($res/l2ald-mac-move-entry[contains(l2ald-mac-move-bridge-domain,$db)]);
+        expr jcs:output ($db-count);
+		
+		/* Count total number of move from LSI <-> PHY &  PHY <-> PHY */
+		
+        var $lsi-to-phy-count = count($res/l2ald-mac-move-entry[starts-with(l2ald-mac-move-from-ifl,"lsi") && not(starts-with(l2ald-mac-move-to-ifl,"lsi")) && contains (l2ald-mac-move-bridge-domain,$db)]);
+        var $phy-to-lsi-count = count($res/l2ald-mac-move-entry[starts-with(l2ald-mac-move-to-ifl,"lsi") && not(starts-with(l2ald-mac-move-from-ifl,"lsi")) && contains (l2ald-mac-move-bridge-domain,$db)]);
+        var $phy-to-phy-count = count($res/l2ald-mac-move-entry[not(starts-with(l2ald-mac-move-to-ifl,"lsi")) && not(starts-with(l2ald-mac-move-from-ifl,"lsi")) && contains (l2ald-mac-move-bridge-domain,$db)]);
+		var $total = $lsi-to-phy-count + $phy-to-lsi-count + $phy-to-phy-count;
+
+        var $count = count($res/l2ald-mac-move-entry/l2ald-mac-address);
+
+        expr jcs:output("LSI to non-LSI count: ", $lsi-to-phy-count);
+        expr jcs:output("non-LSI to LSI count: ", $phy-to-lsi-count);
+		expr jcs:output("non-LSI to LSI count: ", $phy-to-phy-count);
+        expr jcs:output("Total: ",$total);
+
+		var $per = ($total div $db-count) * 100;
+		<output> "Percent: " _ $per;
+
+    if ($per > "90"){
+        <output> "Loop Detected";
+        call syslog();
+
+    } else {
+        var $clm-rpc2 = <command> "clear l2-learning mac-move-buffer";
+		var $clm2 = jcs:invoke( $clm-rpc2 );
+		
+		/* Generates Syslog on ALL the nodes that the script Runs */
+		expr jcs:syslog("user.notice","VPLS_LOOP_SCRIPT Initiated and Cleared l2-mac-move-buffer.");
+    }
+} else {
+        expr jcs:output("NM Loop , Ignore it.!");
+		expr jcs:output($db);
+        var $clm-rpc2 = <command> "clear l2-learning mac-move-buffer";
+		var $clm2 = jcs:invoke( $clm-rpc2 );
+		
+		/* Generates Syslog on ALL the nodes that the script Runs */
+		expr jcs:syslog("user.notice","VPLS_LOOP_SCRIPT Initiated NO ACTION TAKEN..! For Instance: ", $db); 
+  }
+ }
+}
+}
+
+template syslog () {
+
+
+var $clm-rpc1 = <command> "clear l2-learning mac-move-buffer";
+var $clm1 = jcs:invoke( $clm-rpc1 );
+
+expr jcs:sleep(10);
+
+    var $mac-move-rpc = {
+      <get-l2-learning-mac-move-buffer-information> {
+        <extensive>;
+      }
+    }
+    var $res = jcs:invoke($mac-move-rpc);
+    for-each ($res/l2ald-mac-move-entry){
+                var $from = l2ald-mac-move-from-ifl;
+                var $to = l2ald-mac-move-to-ifl;
+                var $add = l2ald-mac-address;
+				var $db = l2ald-mac-move-bridge-domain;
+				var $domain = jcs:regex("__(.*)__",$db);
+				expr jcs:output ($domain[2]);
+				
+
+                /* Compares the Last Entry in L2-Learning mac-move-buffer */
+
+                if ( position() == last() ) {
+					/* Exclude VRRP=00:00:5e:00:01:xx, HSRP=00:00:0c:07:ac:xx, GLBP=00:07:b4:00:01:xx, WLBS=02:bf */
+					
+					if (jcs:regex( "00:00:5e:00:01:..", $add) or jcs:regex( "00:00:0c:07:ac:..", $add) or jcs:regex( "00:07:b4:00:01:..", $add) or jcs:regex( "02:bf:..:..:..:..", $add)) {
+						expr jcs:output ("Skipping... " , $add);
+						expr jcs:syslog("user.notice","VPLS_LOOP_SCRIPT  Virtual Mac ", $add, " Routing-instance ", $db, " Flapping..");
+					}
+					
+					if ($domain[2] == $inst1 || $domain[2] == $inst2 || $domain[2] == $inst3 || $domain[2] == $inst4) {
+						expr jcs:output ("ONLY FILESERVE.!");					
+						if (starts-with($from,"lsi") && not (starts-with($to,"lsi"))){
+                          /* Split the TO interface into Physical (IFD) and Unit (IFL) */
+
+                          var $pattern = "[.]";
+                          var $substrings = jcs:split($pattern, $to);
+                          var $physical = $substrings[1];
+                          var $unit = $substrings[2];
+
+                          /* Generates Syslog to Notify Loop Condition */
+
+                          expr jcs:syslog("user.notice","VPLS_LOOP_SCRIPT Interface ", $physical, ".", $unit, " shutdown due to loop.");
+
+                          /* Configuration to be Disable */
+
+                           var $config-change = <configuration> {
+                                 <interfaces>  {
+                                     <interface>  {
+                                      <name> $physical;
+                                            <unit> {
+                                                <name> $unit;
+                                                call jcs:emit-comment();
+                                                <disable>;
+                                            }
+                                      }
+                                }
+                            }
+
+                            /* Disable the Looped Unit (IFL) - Edit Private Mode is used */
+
+                            var $connection = jcs:open();
+                            var $config-private =   <open-configuration> {
+                                  <private>;
+                             }
+                            var $private-results = jcs:execute( $connection, $config-private );
+                            var $load-configuration =   <load-configuration> {
+                                   copy-of $config-change;
+                            }
+                            var $load-results = jcs:execute( $connection, $load-configuration );
+                            var $commit-configuration = <commit-configuration>;
+                            var $commit-results = jcs:execute( $connection, $commit-configuration );
+                            var $close-private = <close-configuration>;
+                            var $close-configuration-results = jcs:execute( $connection, $close-private );
+                            var $close-results = jcs:close( $connection );
+						}
+                        } else {
+							expr jcs:syslog("user.notice","VPLS_LOOP_SCRIPT NO ACTION Configured.");
+						}
+                    }
+             }
+
+
+expr jcs:sleep(10);
+/* Clear l2-learning mac-move-buffer */
+
+var $clm-rpc2 = <command> "clear l2-learning mac-move-buffer";
+var $clm2 = jcs:invoke( $clm-rpc2 );
+
+/* Generates Syslog on ALL the nodes that the script Runs */
+
+expr jcs:syslog("user.notice","VPLS_LOOP_SCRIPT Initiated and Cleared l2-mac-move-buffer.");
+expr jcs:syslog("user.notice","VPLS_LOOP_SCRIPT * * *  Ended * * *.");
+
+}
