@@ -1,0 +1,144 @@
+version 1.0;
+
+/*
+- MAC Location Aware - VPLS Loop Detection
+- Current Junos Release does have loop dection mechanisim.
+- Which generates Syslog and capture the move in Mac-move-buffer
+- But NO action mechansim is avaiable that could shutdown the
+- Looped Logical Interface.
+-
+- This is work around script that use snapshot of VPLS Mac table 
+- and then during the loop event uses this snapshot to coreleate the MAC 
+- original location and shutdown only the looped interface unit.
+-
+- Script by : 
+- Neeraj Shetty , System Engineer.
+- E-mail : nshetty@juniper.net
+- Copyright (c) 2005, Juniper Networks, Inc.
+- All rights reserved.
+-
+ */
+ 
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns date = "http://exslt.org/dates-and-times";
+
+import "../import/junos.xsl";
+
+match / {
+    <op-script-output> {
+    
+    /* Dampens the Script to Run Once every Minute */    
+    if (jcs:dampen ("VPLS_Loop",1,1)){
+        var $file = document ("/var/tmp/mac/vpls_mac_snapshot.xml");
+    
+        /* Check for Empty Mac-table Condition */    
+        if (jcs:empty( $file//*[local-name() == "l2ald-mac-entry"] )){
+            var $emt = "empty";
+            var $mac = "empty";
+            call syslog ($mac,$emt);
+        }
+        for-each ($file//*[local-name() == "l2ald-mac-entry"]) {
+           var $db = ./*[local-name() == "l2-mac-bridging-domain"];
+           var $mac = ./*[local-name() == "l2-mac-address"];
+           var $intf = ./*[local-name() == "l2-mac-logical-interface"];
+           if(starts-with($intf,"lsi")) {
+                var $emt = "full";
+               call syslog ($mac,$emt);
+           }
+        }
+      }
+    }
+}
+
+template syslog ($mac,$emt) {
+
+    var $mac-move-rpc = {
+      <get-l2-learning-mac-move-buffer-information> {
+        <extensive>;
+      }
+    }
+    var $res = jcs:invoke($mac-move-rpc);
+    for-each ($res/l2ald-mac-move-entry){
+                var $from = l2ald-mac-move-from-ifl;
+                var $to = l2ald-mac-move-to-ifl;
+                var $add = l2ald-mac-address;
+        
+                /* Compares the Last Entry in L2-Learning mac-move-buffer */
+        
+                if ( position() == last() ) {
+                    if (not (starts-with($to,"lsi"))){
+            
+               /* Match the Mac in Mac-move-buffer and Snapshot */
+               /* Disabled the Physical Interface incase of Empty Mac Table (Newly Provisioned Instance) */
+                      
+                        if ($mac == $add || $emt == "empty")  {
+            
+                          /* Split the TO interface into Physical (IFD) and Unit (IFL) */
+              
+                          var $pattern = "[.]";
+                          var $substrings = jcs:split($pattern, $to);
+                          var $physical = $substrings[1];
+                          var $unit = $substrings[2];
+              
+                          /* Generates Syslog to Notify Loop Condition */
+                
+                          expr jcs:syslog("daemon.debug"," [VPLS-LOOP-DETECTED]: Interface ", $physical, ".", $unit, " shutdown due to loop.");
+
+                          /* Clear l2-learning mac-move-buffer - Reducdes Number of lookup on Spawned Instance of Script */
+              
+                          var $clm-rpc = <command> "clear l2-learning mac-move-buffer";
+                          var $clm = jcs:invoke( $clm-rpc );
+              
+                          /* Configuration to be Disable */
+                            
+                           var $config-change = <configuration> {
+                                 <interfaces>  {
+                                     <interface>  {
+                                      <name> $physical;
+                                            <unit> {
+                                                <name> $unit;
+                                                call jcs:emit-comment();
+                                                <disable>;
+                                            }
+                                      }
+                                }
+                            }
+                
+                            /* Disable the Looped Unit (IFL) - Edit Private Mode is used */
+                
+                            var $connection = jcs:open();
+                            var $config-private =   <open-configuration> {
+                                  <private>;
+                             }
+                            var $private-results = jcs:execute( $connection, $config-private );
+                            var $load-configuration =   <load-configuration> {
+                                   copy-of $config-change;
+                            }
+                            var $load-results = jcs:execute( $connection, $load-configuration );
+                            var $commit-configuration = <commit-configuration>;
+                            var $commit-results = jcs:execute( $connection, $commit-configuration );
+                            var $close-private = <close-configuration>;
+                            var $close-configuration-results = jcs:execute( $connection, $close-private );
+                            var $close-results = jcs:close( $connection );
+
+                        }
+                    }
+             }
+    }
+
+/* Sleep for 30 Second */
+
+expr jcs:sleep(30);
+
+/* Clear l2-learning mac-move-buffer */
+
+var $clm-rpc1 = <command> "clear l2-learning mac-move-buffer";
+var $clm1 = jcs:invoke( $clm-rpc1 );
+
+/* Generates Syslog on ALL the nodes that the script Runs */
+
+expr jcs:syslog("daemon.debug","VPLS Loop Script Cleared l2-mac-move-buffer.");
+
+}
