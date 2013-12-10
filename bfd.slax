@@ -1,0 +1,69 @@
+version 1.0;
+
+/*
+- Show BFD session
+- The OUTPUT of CLI Command "show bfd session" is not very easy to read
+- I made the ouput bit easier and simple to read and this very helpfull
+- during troubleshooting and docuemnting test result.
+-
+- SAMPLE OUTPUT
+-
+- IP        Type      State     Interface LD        RD        L-Site    R-Site    
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    7034      2771      13        28        
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    7033      13146     13        6         
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    7032      2368      13        26        
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    7031      2340      13        27        
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    7030      1876      13        4         
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    7029      1803      13        24        
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    7028      11175     13        30        
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    7027      129978    13        32        
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    7026      9484      13        21        
+- 127.0.0.1 VPLS-OAM  Up        ae10.0    6853      2031      13        8         
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    6839      868       13        12        
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    6837      12276     13        5         
+- 127.0.0.1 VPLS-OAM  Up        ae12.0    6832      11557     13        31        
+- 127.0.0.1 VPLS-OAM  Up        ae13.0    6289      1921      13        17        
+- 127.0.0.1 VPLS-OAM  Up        ae13.0    6288      791       13        22        
+- 127.0.0.1 VPLS-OAM  Up        ae13.0    6286      7490      13        11        
+- 127.0.0.1 VPLS-OAM  Up        ae13.0    6258      1368      13        16        
+- 127.0.0.1 VPLS-OAM  Up        ae13.0    5884      15267     13        15        
+- 127.0.0.1 VPLS-OAM  Up        ae11.0    5638      582       13        7         
+- 127.0.0.1 VPLS-OAM  Up        ae13.0    5574      3872      13        14        
+- 127.0.0.1 VPLS-OAM  Up        ae13.0    5570      22244     13        2         
+- 127.0.0.1 VPLS-OAM  Up        ae13.0    5543      3486      13        9         
+- 127.0.0.1 VPLS-OAM  Up        ae13.0    5542      964       13        10        
+- 127.0.0.1 VPLS-OAM  Up        ae13.0    5533      2805      13        29  
+-
+- END
+-
+- Author        : Neeraj Shetty
+- E-mail        : nshetty@juniper.net
+- Version       : 2.0
+- Last Modified : 
+-
+- Copyright (c) 2005, Juniper Networks, Inc.
+- All rights reserved.
+-
+ */
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+match / {
+    <op-script-output> {
+        var $rpc = <get-bfd-session-information> {
+            <extensive>;
+         }
+        var $out = jcs:invoke($rpc);
+         <output> jcs:printf ("%-10s%-10s%-10s%-10s%-10s%-10s%-10s%-10s","IP","Type","State","Interface","LD","RD","L-Site","R-Site");
+	<bfd-session-information junos:style = "extensive"> {
+                for-each ($out/bfd-session) {
+                        if (bfd-client/client-name = 'VPLS-OAM') {
+ <output> jcs:printf ("%-10s%-10s%-10s%-10s%-10s%-10s%-10s%-10s",session-neighbor,bfd-client/client-name ,session-state, session-interface,local-discriminator ,remote-discriminator ,l2vpn-local-site-id,l2vpn-remote-site-id);
+                           }
+                }
+            }
+        }
+}
