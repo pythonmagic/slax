@@ -1,0 +1,300 @@
+ /*
+ * YOU MUST ACCEPT THE TERMS OF THIS DISCLAIMER TO USE THIS SOFTWARE.
+ *
+ * JUNIPER IS WILLING TO MAKE THE INCLUDED SCRIPTING SOFTWARE AVAILABLE TO YOU
+ * ONLY UPON THE CONDITION THAT YOU ACCEPT ALL OF THE TERMS CONTAINED IN THIS
+ * DISCLAIMER. PLEASE READ THE TERMS AND CONDITIONS OF THIS DISCLAIMER CAREFULLY.
+ *
+ * THE SOFTWARE CONTAINED IN THIS FILE IS PROVIDED "AS IS".  JUNIPER MAKES NO
+ * WARRANTIES OF ANY KIND WHATSOEVER WITH RESPECT TO SOFTWARE. ALL EXPRESS OR
+ * IMPLIED CONDITIONS, REPRESENTATIVES AND WARRANTIES, INCLUDING ANY WARRANTY
+ * OF NON-INFRINGEMENT OR WARRANTY OF MERCHANTABILITY OR FITNESS FOR A
+ * PARTICULAR PURPOSE, ARE HEREBY DISCLAIMED AND EXCLUDED TO THE EXTENT
+ * ALLOWED BY APPLICABLE LAW.
+ *
+ * IN NO EVENT WILL JUNIPER BE LIABLE FOR ANY LOST REVENUE, PROFIT OR DATA, OR
+ * FOR DIRECT, SPECIAL, INDIRECT, CONSEQUENTIAL, INCIDENTAL OR PUNITIVE DAMAGES
+ * HOWEVER CAUSED AND REGARDLESS OF THE THEORY OF LIABILITY ARISING OUT OF THE
+ * USE OF OR INABILITY TO USE THE SOFTWARE, EVEN IF JUNIPER HAS BEEN ADVISED OF
+ * THE POSSIBILITY OF SUCH DAMAGES.
+ *
+ *
+ * Author        : Neeraj Shetty
+ * E-mail        : nshetty@juniper.net
+ * Version       : 5.0
+ * Last Modified : 12/10/2014
+ *
+ * Description   : BERT.slax
+ *
+ * This event script is written to run on a configurable interval to "poll"
+ * the interface error counter like CRC and BIT Error for 10G & 100G interfaces on a Juniper router.
+ * This script allows to take link-down & generates syslog action based on configured threshold.
+ * 
+ * Threshold value are configured in error/sec for example if you configured ALARM_CRC = 1000 that means
+ * the script will take action when CRC exceeds 1000 CRC error per second on any given interface.
+ *
+ * Below is a sample event policy configuration which will be triggered
+ * every interval that the script is run.  A "generate" event is used to trigger
+ * the script to run, much like a cron job.
+ *
+ * ---
+ * event-options {
+ *     generate-event {
+ *         %M time-interval 300;
+ *     }
+ *     policy poll_optics {
+ *         events 5M;
+ *         then {
+ *             event-script BERT.slax {
+ *                 arguments {
+ *                              ALARM_CRC 1000;
+ *                              ALARM_BERS 100;
+ *                              ALARM_BEBS 100
+ *                 }
+ *             }
+ *         }
+ *     }
+ */
+ 
+version 1.0;
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+import "../import/junos.xsl";
+
+var $arguments = {
+        <argument> {
+                <name> "ALARM_CRC";
+                <description> "Threshold for CRC";
+        }
+        <argument> {
+                <name> "ALARM_BERS";
+                <description> "Threshold for BERS";
+        }
+        <argument> {
+                <name> "ALARM_BEBS";
+                <description> "Threshold for BEBS";
+        }
+}
+ 
+param $ALARM_CRC;
+param $ALARM_BERS;
+param $ALARM_BEBS;
+ 
+match / {
+    <op-script-results> {
+		expr jcs:syslog("user.notice","BERT_SCRIPT Started.!");
+		
+		expr jcs:output("Before XE");
+		
+		var $rpc = {
+			<get-interface-information> {
+			<terse>;
+			}
+		}
+		
+		var $interface = jcs:invoke($rpc);
+		for-each ($interface/physical-interface[starts-with(name,'xe-') || starts-with(name,'et-')]) {
+			if ($interface/physical-interface/admin-status = "up" && $interface/physical-interface/oper-status = "up"){
+				call read_stat_before($filename = "/var/tmp/bert_before", $intf_pat = name);
+			}
+		}
+		
+
+		
+		expr jcs:output("Sleeping..!");
+		expr jcs:sleep(30);
+		
+		expr jcs:output("After");
+		/* call read_stat($filename = "/var/tmp/bert_after"); */
+		call read_stat_after($read_after_filename = "/var/tmp/bert_after");
+		
+		expr jcs:output("Compare");
+	    call error_sec($before = "/var/tmp/bert_before" ,$after = "/var/tmp/bert_after");
+		
+		/* Delete Temporary Stored file in  /var/tmp */
+		var $process-rpc-1 = <command> "file delete /var/tmp/bert*";
+		var $processes = jcs:invoke( $process-rpc-1 );
+		<output> "[NO ERROR Detected] File /var/tmp/bert* Deleted.!";
+    }
+}
+
+template error_sec($before,$after){
+ 
+    var $rpc1 = {
+        <file-get> {
+        <filename> $before;
+        <encoding> "raw";
+		}
+    }
+    var $stat_before = jcs:invoke( $rpc1 );
+	
+	var $rpc2 = {
+        <file-get> {
+        <filename> $after;
+        <encoding> "raw";
+		}
+    }
+    var $stat_after = jcs:invoke( $rpc2 );
+	
+	var $lines_before = jcs:break-lines( $stat_before/file-contents );
+	var $lines_after = jcs:break-lines( $stat_after/file-contents );
+	
+	for-each ($lines_before){
+       var $pattern = "(,)";
+	   var $sub_before = jcs:split($pattern,.);
+	   for-each ($lines_after){
+	   		var $sub_after = jcs:split($pattern,.);
+			if ($sub_after[1] == $sub_before[1]){	
+				var $intf = $sub_after[1];
+				var $crc_sec = round(($sub_after[2] - $sub_before[2]) div 30);
+				var $bers_sec = round(($sub_after[3] - $sub_before[3]) div 30);
+				var $bebs_sec = round(($sub_after[4] - $sub_before[4]) div 30);
+				
+				 if ( $crc_sec > $ALARM_CRC || $bers_sec > $ALARM_BERS || $bebs_sec > $ALARM_BEBS){
+					expr jcs:output($intf);
+				 	expr jcs:output("CRC");
+					expr jcs:output($sub_after[2]);
+					expr jcs:output($sub_before[2]);
+					expr jcs:output("--------");
+					expr jcs:output("BERS");
+					expr jcs:output($sub_after[3]);
+					expr jcs:output($sub_before[3]);
+					expr jcs:output("--------");
+					expr jcs:output("BEBS");
+					expr jcs:output($sub_after[4]);
+					expr jcs:output($sub_before[4]);
+					expr jcs:output("--------");
+					expr jcs:syslog("user.notice","BERT Detected on Interface: ",$intf, " CRC: " ,$crc_sec);
+					call disable_interface($intf);
+				 }
+			}
+		}
+    } 
+
+}
+
+template read_stat_before($filename,$intf_pat){
+
+	var $rpc2 = {
+		<get-interface-information> {
+		<extensive>;
+		<interface-name> name;
+		}
+	}
+	
+	var $out2 = jcs:invoke($rpc2);
+	
+	if ($out2//xnm:error) {
+		copy-of $out2//xnm:error;
+	}
+	
+	<xsl:document href=$filename append="yes" method="text"> {
+		for-each ($out2/physical-interface) {
+			if (not(input-error-list/framing-errors = "0") || not(ethernet-pcs-statistics/bit-error-seconds = "0") || not(ethernet-pcs-statistics/errored-blocks-seconds = "0")){
+				var $intf = name;
+				var $crc = input-error-list/framing-errors;
+				var $bers = ethernet-pcs-statistics/bit-error-seconds;
+				var $bebs = ethernet-pcs-statistics/errored-blocks-seconds;
+				expr $intf _ "," _ $crc _ "," _ $bers _ "," _ $bebs _"\n";
+			}
+		}
+	}
+}
+
+template disable_interface($intf){
+ 
+/* Configuration to be Disable */
+ 
+var $config-change = <configuration> {
+         <interfaces>  {
+                <interface>  {
+                        <name> $intf;
+                        call jcs:emit-comment();
+                        <disable>;
+            }
+        }
+}
+ 
+/* Open connection with mgd */
+ 
+var $con = jcs:open();
+ 
+/* Create condition to log error message if connect fails */
+ 
+if (not($con)) {
+        expr jcs:syslog("user.notice","BERT_SCRIPT Unable to connect to mgd.");
+}
+ 
+/* Create condition to apply config change and log result */
+ 
+        else {
+                var $change-result := {
+                call jcs:load-configuration($connection=$con,$configuration=$config-change);
+                }
+                if ($change-result//xnm:error) {
+                        expr jcs:syslog("user.notice", "BERT_SCRIPT Error during commit (",$change-results//xnm:error/message, ")");
+                }
+                else if ($change-result//xnm:warning) {
+                        expr jcs:syslog("user.notice"," BERT_SCRIPT Warning during commit (",$change-results//xnm:warning/message, ")");
+                }
+                else {
+                        expr jcs:syslog("user.notice","BERT_SCRIPT Interface ", $intf, " Shutdown due to error..!!");
+                }
+                expr jcs:close($con);
+        }
+ 
+/* Clear the Interface Counter */
+ 
+        var $clear_counter = <clear-interfaces-statistics> {
+            <interface-name> $intf;
+        }
+        var $cc = jcs:invoke($clear_counter);
+ 
+ /* Delete Temporary Stored file in  /var/tmp */
+        var $process-rpc = <command> "file delete /var/tmp/bert*";
+        var $processes = jcs:invoke( $process-rpc );
+		<output> "[ERROR Detected] File /var/tmp/bert* Deleted.!";
+
+		expr jcs:syslog("user.notice","BERT_SCRIPT Ended.!");
+}
+
+template read_stat_after($read_after_filename){
+
+var $con1 = jcs:open();
+
+    var $rpc1_after = {
+        <file-get> {
+        <filename> "/var/tmp/bert_before";
+        <encoding> "raw";
+		}
+    }
+    var $stat_after = jcs:invoke( $rpc1_after );
+	var $lines_after = jcs:break-lines( $stat_after/file-contents );
+	
+	for-each ($lines_after){
+       var $pattern = "(,)";
+	   var $read_after_split = jcs:split($pattern,.);
+		var $rpc2_after = {
+			<get-interface-information> {
+				<extensive>;
+				<interface-name> $read_after_split[1];
+			}
+		}
+		expr jcs:output($read_after_split[1]);
+		var $out2_after = jcs:execute($con1, $rpc2_after);
+		if ($out2_after//xnm:error) {
+			copy-of $out2_after//xnm:error;
+		}
+		<xsl:document href=$read_after_filename append="yes" method="text"> {
+			for-each ($out2_after/physical-interface) {
+				var $intf-2 = name;
+				var $crc = input-error-list/framing-errors;
+				var $bers = ethernet-pcs-statistics/bit-error-seconds;
+				var $bebs = ethernet-pcs-statistics/errored-blocks-seconds;
+				expr $intf-2 _ "," _ $crc _ "," _ $bers _ "," _ $bebs _"\n";
+			}
+		}
+	}
+    expr jcs:close($con1);
+}
